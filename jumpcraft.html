@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Веб Крафт 3D - Прыжок!</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #87CEEB; }
+        canvas { display: block; }
+        #joystick-container {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            width: 150px;
+            height: 150px;
+            z-index: 10; /* Убедимся, что джойстик поверх */
+        }
+        #block-info {
+             position: absolute;
+             top: 10px;
+             left: 10px;
+             color: white;
+             font-family: monospace;
+             background-color: rgba(0,0,0,0.5);
+             padding: 5px;
+             border-radius: 3px;
+             z-index: 10;
+        }
+        #crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 2px;
+            height: 20px;
+            background-color: white;
+            transform: translate(-50%, -50%);
+            z-index: 10;
+        }
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 2px;
+            background-color: white;
+            transform: translate(-50%, -50%);
+        }
+        /* Стили для кнопки прыжка */
+        #jump-button {
+            position: absolute;
+            bottom: 40px; /* Расположим рядом с джойстиком, но справа */
+            right: 40px;
+            width: 80px;
+            height: 80px;
+            background-color: rgba(255, 255, 255, 0.5);
+            border: 2px solid rgba(255, 255, 255, 0.8);
+            border-radius: 50%; /* Круглая кнопка */
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            user-select: none; /* Отключить выделение текста */
+            -webkit-tap-highlight-color: transparent; /* Убрать подсветку при касании */
+            z-index: 10;
+        }
+        #jump-button:active { /* Стиль при нажатии */
+             background-color: rgba(255, 255, 255, 0.7);
+        }
+    </style>
+</head>
+<body>
+    <div id="joystick-container"></div>
+    <div id="block-info">Ставим: Серый блок</div>
+    <div id="crosshair"></div>
+    <button id="jump-button">Jump</button> {/* Кнопка прыжка */}
+    <canvas id="game-canvas"></canvas>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.10.1/nipplejs.min.js"></script>
+
+    <script type="module">
+        // --- Основные компоненты Three.js ---
+        let scene, camera, renderer;
+        let clock = new THREE.Clock();
+
+        // --- Мир и Блоки ---
+        const worldObjects = new Map();
+        const blockSize = 1;
+        const worldSize = 16;
+        const worldHeight = 8;
+        const materials = {};
+        const blockTypeToPlace = 'gray';
+
+        // --- Игрок ---
+        const playerHeight = 1.8;
+        const playerWidth = 0.6; // Ширина игрока для коллизий
+        const playerSpeed = 5.0;
+        const playerLookSpeed = 2.0;
+        let moveForward = 0;
+        let moveRight = 0;
+        let rotateYaw = 0;
+        let rotatePitch = 0;
+        const playerVelocity = new THREE.Vector3();
+        const playerDirection = new THREE.Vector3();
+        let onGround = false; // Флаг нахождения на земле
+        let canJump = false;  // Флаг возможности прыжка
+        const gravity = 19.6; // Увеличим гравитацию (ближе к 2*9.8)
+        const jumpForce = 8.0; // Сила прыжка
+
+        // --- Управление ---
+        let joystick;
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let isTouchingLook = false;
+        let touchActionTimeout = null;
+        let isBreakingBlock = false;
+
+        // --- Взаимодействие ---
+        const raycaster = new THREE.Raycaster();
+        const interactionDistance = 5;
+
+        // --- Инициализация ---
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 10, 90); // Начинаем туман чуть дальше
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100); // Уменьшил far clip
+            camera.position.set(worldSize / 2, playerHeight + 2, worldSize / 2);
+            camera.rotation.order = 'YXZ';
+
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('game-canvas'), antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7); // Немного светлее
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(15, 30, 20); // Поднял солнце повыше
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 1024;
+            directionalLight.shadow.mapSize.height = 1024;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 60; // Увеличил дальность тени
+            directionalLight.shadow.camera.left = -20; // Увеличил область тени
+            directionalLight.shadow.camera.right = 20;
+            directionalLight.shadow.camera.top = 20;
+            directionalLight.shadow.camera.bottom = -20;
+            scene.add(directionalLight);
+            // Helper для отладки света (можно раскомментировать)
+            // const helper = new THREE.CameraHelper( directionalLight.shadow.camera );
+            // scene.add( helper );
+
+            createMaterials();
+            generateWorld();
+            setupControls();
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+
+             // Отладка: Проверка количества объектов после генерации
+             console.log(`World generated, ${worldObjects.size} blocks added.`);
+             console.log(`Scene has ${scene.children.length} children.`);
+             // Отладка: Начальная позиция камеры
+             console.log(`Initial Camera Position:`, camera.position);
+        }
+
+        // --- Создание Материалов ---
+        function createMaterials() {
+            materials.green = new THREE.MeshStandardMaterial({
+                 color: 0x228B22, // ForestGreen
+                 roughness: 0.9, // Более матовый
+                 metalness: 0.0
+            });
+            materials.gray = new THREE.MeshStandardMaterial({
+                color: 0x888888, // Чуть светлее серый
+                roughness: 0.8,
+                metalness: 0.0
+            });
+            materials.default = new THREE.MeshStandardMaterial({ color: 0xff00ff });
+        }
+
+        // --- Геометрия Блока ---
+        const blockGeometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+
+        // --- Генерация Мира ---
+        function generateWorld() {
+            for (let x = 0; x < worldSize; x++) {
+                for (let z = 0; z < worldSize; z++) {
+                    addBlock(x, 0, z, 'green'); // Основа
+                    addBlock(x, 1, z, 'green'); // Верхний слой
+                }
+            }
+        }
+
+        // --- Добавление Блока ---
+        function addBlock(x, y, z, type) {
+            const key = `${x},${y},${z}`;
+            if (worldObjects.has(key) || y < 0 || y >= worldHeight) return;
+
+            let material = materials[type] || materials.default;
+            const mesh = new THREE.Mesh(blockGeometry, material);
+            mesh.position.set(x + blockSize / 2, y + blockSize / 2, z + blockSize / 2);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.userData = { type: type, x: x, y: y, z: z, isBlock: true };
+
+            scene.add(mesh);
+            worldObjects.set(key, mesh);
+        }
+
+        // --- Удаление Блока ---
+        function removeBlock(x, y, z) {
+            const key = `${x},${y},${z}`;
+            const mesh = worldObjects.get(key);
+            if (mesh) {
+                if (y === 0) return; // Не ломать основу
+                scene.remove(mesh);
+                worldObjects.delete(key);
+            }
+        }
+
+        // --- Получение Блока по Мировым Координатам ---
+        function getBlockFromWorldCoords(wx, wy, wz) {
+            const x = Math.floor(wx);
+            const y = Math.floor(wy);
+            const z = Math.floor(wz);
+            const key = `${x},${y},${z}`;
+            return worldObjects.get(key);
+        }
+
+        // --- Настройка Управления ---
+        function setupControls() {
+            // Джойстик (без изменений)
+            const joystickOptions = { zone: document.getElementById('joystick-container'), mode: 'static', position: { left: '75px', bottom: '75px' }, color: 'rgba(255, 255, 255, 0.5)', size: 100 };
+            joystick = nipplejs.create(joystickOptions);
+            joystick.on('move', (evt, data) => {
+                if (data.vector) {
+                    const angle = data.angle.radian;
+                    const force = Math.min(data.force, 1.0);
+                    moveForward = Math.sin(angle) * force;
+                    moveRight = Math.cos(angle) * force;
+                 }
+            });
+            joystick.on('end', () => { moveForward = 0; moveRight = 0; });
+
+            // Касания для поворота и действий (без изменений)
+            const canvas = document.getElementById('game-canvas');
+            canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+            canvas.addEventListener('touchend', onTouchEnd);
+
+            // --- Обработчик Кнопки Прыжка ---
+            const jumpButton = document.getElementById('jump-button');
+            jumpButton.addEventListener('touchstart', (e) => {
+                e.preventDefault(); // Предотвратить эмуляцию клика и скролл
+                handleJump();
+            }, { passive: false });
+             jumpButton.addEventListener('click', handleJump); // Для десктопа
+        }
+
+         // --- Функция Прыжка ---
+         function handleJump() {
+             console.log("Trying to jump. On ground:", onGround, "Can jump:", canJump);
+             if (canJump && onGround) { // Прыгаем только если стоим на земле
+                 playerVelocity.y = jumpForce;
+                 canJump = false; // Нельзя прыгать снова до приземления
+                 onGround = false; // Мы больше не на земле
+             }
+         }
+
+
+        function onTouchStart(event) {
+            const touch = event.changedTouches[0];
+            const joystickZone = document.getElementById('joystick-container').getBoundingClientRect();
+            const jumpButtonZone = document.getElementById('jump-button').getBoundingClientRect();
+
+             // Игнорировать касания в зонах джойстика и кнопки прыжка
+             if ((touch.clientX >= joystickZone.left && touch.clientX <= joystickZone.right &&
+                  touch.clientY >= joystickZone.top && touch.clientY <= joystickZone.bottom) ||
+                 (touch.clientX >= jumpButtonZone.left && touch.clientX <= jumpButtonZone.right &&
+                  touch.clientY >= jumpButtonZone.top && touch.clientY <= jumpButtonZone.bottom))
+             {
+                 isTouchingLook = false; // Сбросить флаг, если начали касание над UI
+                 clearTimeout(touchActionTimeout); // Отменить действие, если оно было запланировано
+                 isBreakingBlock = false;
+                 return;
+             }
+
+
+            event.preventDefault();
+
+             clearTimeout(touchActionTimeout);
+             isBreakingBlock = false;
+             touchActionTimeout = setTimeout(() => {
+                 handleAction(true); // Долгое нажатие - ломать
+                 isBreakingBlock = true;
+             }, 500);
+
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+            isTouchingLook = true;
+        }
+
+        function onTouchMove(event) {
+            if (!isTouchingLook) return;
+            event.preventDefault();
+            const touch = event.changedTouches[0];
+            const deltaX = touch.clientX - touchStartX;
+            const deltaY = touch.clientY - touchStartY;
+            rotateYaw -= deltaX * playerLookSpeed * 0.002;
+            rotatePitch -= deltaY * playerLookSpeed * 0.002;
+            rotatePitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, rotatePitch));
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+             if (Math.abs(deltaX) > 5 || Math.abs(deltaY) > 5) {
+                 clearTimeout(touchActionTimeout);
+                 isBreakingBlock = false;
+             }
+        }
+
+        function onTouchEnd(event) {
+             if (!isTouchingLook) return; // Если касание не отслеживалось для поворота/действия
+
+             clearTimeout(touchActionTimeout);
+             if (!isBreakingBlock) {
+                 handleAction(false); // Короткое нажатие - ставить блок
+             }
+             isTouchingLook = false;
+             isBreakingBlock = false;
+        }
+
+        // --- Обработка Действий (Поставить/Сломать) ---
+        function handleAction(isBreaking) {
+            raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+            const intersects = raycaster.intersectObjects(Array.from(worldObjects.values()));
+
+            if (intersects.length > 0) {
+                const intersection = intersects[0];
+                if (intersection.distance < interactionDistance) {
+                    const blockMesh = intersection.object;
+                    const blockData = blockMesh.userData;
+
+                    if (isBreaking) {
+                        removeBlock(blockData.x, blockData.y, blockData.z);
+                    } else {
+                        const normal = intersection.face.normal.clone();
+                        const placePos = new THREE.Vector3(blockData.x, blockData.y, blockData.z).add(normal);
+                        const placeX = Math.round(placePos.x);
+                        const placeY = Math.round(placePos.y);
+                        const placeZ = Math.round(placePos.z);
+
+                        // Простая проверка AABB с игроком
+                         const playerBox = new THREE.Box3(
+                             new THREE.Vector3(camera.position.x - playerWidth/2, camera.position.y - playerHeight, camera.position.z - playerWidth/2),
+                             new THREE.Vector3(camera.position.x + playerWidth/2, camera.position.y, camera.position.z + playerWidth/2)
+                         );
+                         const blockBox = new THREE.Box3(
+                             new THREE.Vector3(placeX, placeY, placeZ),
+                             new THREE.Vector3(placeX + blockSize, placeY + blockSize, placeZ + blockSize)
+                         );
+
+                        if(!playerBox.intersectsBox(blockBox)) {
+                           addBlock(placeX, placeY, placeZ, blockTypeToPlace);
+                        } else {
+                           // console.log("Cannot place block inside player");
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Обновление Позиции и Камеры ---
+        function updatePlayer(deltaTime) {
+            const speed = playerSpeed * deltaTime;
+            const halfWidth = playerWidth / 2;
+
+            // --- Вращение ---
+            camera.rotation.y = rotateYaw;
+            camera.rotation.x = rotatePitch;
+
+            // --- Гравитация ---
+            playerVelocity.y -= gravity * deltaTime;
+
+            // --- Движение (XZ) ---
+            camera.getWorldDirection(playerDirection);
+            const forward = new THREE.Vector3(playerDirection.x, 0, playerDirection.z).normalize();
+            const right = new THREE.Vector3().crossVectors(camera.up, forward).normalize();
+
+            const moveVectorXZ = new THREE.Vector3();
+            moveVectorXZ.add(forward.multiplyScalar(moveForward * speed));
+            moveVectorXZ.add(right.multiplyScalar(-moveRight * speed));
+
+            // --- Проверка Коллизий и Применение Движения ---
+            // Сначала применяем движение по XZ, затем по Y
+            let currentPos = camera.position;
+            let nextPos = currentPos.clone();
+
+            // Проверка по XZ
+            nextPos.x += moveVectorXZ.x;
+            nextPos.z += moveVectorXZ.z;
+
+            // Проверяем столкновения со стенами на уровне ног и головы
+            const feetY = nextPos.y - playerHeight + 0.1; // Чуть выше пола
+            const headY = nextPos.y - 0.1; // Чуть ниже потолка
+
+            // Проверка по X
+            if (moveVectorXZ.x !== 0) {
+                const checkX = nextPos.x + Math.sign(moveVectorXZ.x) * halfWidth;
+                if (getBlockFromWorldCoords(checkX, feetY, currentPos.z) || getBlockFromWorldCoords(checkX, headY, currentPos.z) ||
+                    getBlockFromWorldCoords(checkX, feetY, nextPos.z) || getBlockFromWorldCoords(checkX, headY, nextPos.z) ) { // Проверяем и старую и новую Z координату
+                    moveVectorXZ.x = 0; // Останавливаем движение по X
+                    nextPos.x = currentPos.x; // Возвращаем X
+                }
+            }
+             // Проверка по Z
+             if (moveVectorXZ.z !== 0) {
+                 const checkZ = nextPos.z + Math.sign(moveVectorXZ.z) * halfWidth;
+                 if (getBlockFromWorldCoords(currentPos.x, feetY, checkZ) || getBlockFromWorldCoords(currentPos.x, headY, checkZ) ||
+                     getBlockFromWorldCoords(nextPos.x, feetY, checkZ) || getBlockFromWorldCoords(nextPos.x, headY, checkZ)) { // Проверяем и старую и новую X координату
+                     moveVectorXZ.z = 0; // Останавливаем движение по Z
+                      nextPos.z = currentPos.z; // Возвращаем Z
+                 }
+             }
+
+            camera.position.x = nextPos.x;
+            camera.position.z = nextPos.z;
+
+            // Проверка по Y (Пол/Потолок)
+            onGround = false; // Сбрасываем флаг перед проверкой
+            const verticalVelocity = playerVelocity.y * deltaTime;
+            nextPos.y += verticalVelocity;
+
+            const checkYFeet = nextPos.y - playerHeight; // Позиция ног
+            const checkYHead = nextPos.y;              // Позиция головы
+
+             // Проверка столкновения с полом
+             if (playerVelocity.y <= 0) { // Если падаем или стоим
+                 const feetBlock = getBlockFromWorldCoords(nextPos.x - halfWidth, checkYFeet, nextPos.z - halfWidth) ||
+                                  getBlockFromWorldCoords(nextPos.x + halfWidth, checkYFeet, nextPos.z - halfWidth) ||
+                                  getBlockFromWorldCoords(nextPos.x - halfWidth, checkYFeet, nextPos.z + halfWidth) ||
+                                  getBlockFromWorldCoords(nextPos.x + halfWidth, checkYFeet, nextPos.z + halfWidth);
+
+                 if (feetBlock) {
+                     const groundY = Math.floor(checkYFeet) + 1; // Верхняя поверхность блока под ногами
+                     if (camera.position.y - playerHeight > groundY - 0.01) { // Предотвращаем "проваливание" сквозь пол при высокой скорости
+                         camera.position.y = groundY + playerHeight;
+                         playerVelocity.y = 0;
+                         onGround = true;
+                         canJump = true; // Можно прыгать, когда стоим на земле
+                     }
+                 } else {
+                      camera.position.y = nextPos.y; // Если под ногами пусто, продолжаем падение
+                      canJump = false; // Нельзя прыгать в воздухе
+                 }
+             }
+             // Проверка столкновения с потолком
+             else if (playerVelocity.y > 0) { // Если летим вверх
+                 const headBlock = getBlockFromWorldCoords(nextPos.x - halfWidth, checkYHead, nextPos.z - halfWidth) ||
+                                  getBlockFromWorldCoords(nextPos.x + halfWidth, checkYHead, nextPos.z - halfWidth) ||
+                                  getBlockFromWorldCoords(nextPos.x - halfWidth, checkYHead, nextPos.z + halfWidth) ||
+                                  getBlockFromWorldCoords(nextPos.x + halfWidth, checkYHead, nextPos.z + halfWidth);
+                  if (headBlock) {
+                       const ceilingY = Math.floor(checkYHead); // Нижняя поверхность блока над головой
+                       camera.position.y = ceilingY - 0.01; // Ставим чуть ниже потолка
+                       playerVelocity.y = 0; // Останавливаем вертикальное движение
+                  } else {
+                      camera.position.y = nextPos.y; // Если над головой пусто, продолжаем подъем
+                  }
+             }
+
+
+            // --- Ограничение мира ---
+            // camera.position.x = Math.max(blockSize / 2, Math.min(worldSize - blockSize / 2, camera.position.x)); // Убрал пока для отладки
+            // camera.position.z = Math.max(blockSize / 2, Math.min(worldSize - blockSize / 2, camera.position.z));
+             if (camera.position.y < -20) { // Провалились под мир - возврат
+                  camera.position.set(worldSize / 2, playerHeight + 5, worldSize / 2); // Ставим повыше
+                  playerVelocity.set(0,0,0);
+                  onGround = false;
+                  canJump = false;
+             }
+
+             // Отладка: Позиция камеры в каждом кадре
+             // console.log(`Camera Position: X=${camera.position.x.toFixed(2)} Y=${camera.position.y.toFixed(2)} Z=${camera.position.z.toFixed(2)} | OnGround: ${onGround} | CanJump: ${canJump} | VelocityY: ${playerVelocity.y.toFixed(2)}`);
+        }
+
+
+        // --- Игровой Цикл ---
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = Math.min(0.05, clock.getDelta()); // Ограничиваем deltaTime для стабильности
+
+            updatePlayer(deltaTime);
+            renderer.render(scene, camera);
+        }
+
+        // --- Обработчик Изменения Размера Окна ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Запуск Инициализации ---
+        init();
+
+    </script>
+</body>
+</html>
